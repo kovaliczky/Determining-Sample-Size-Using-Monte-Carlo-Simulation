@@ -1,0 +1,183 @@
+##### R program code for confirmatory factor analysis by changing missing correlations
+
+library(psych)
+
+sink("factor_loadings_v2.txt")
+
+# Create variables
+asrtHR_values <- c(0.2, 0.4, 0.6)
+asrtCatL_values <- c(0.2, 0.4, 0.6)
+catlCr_values <- c(0.2, 0.4, 0.6)
+
+my_matrix <- matrix(c(1, 0.8251, 0, 0, -0.5443, 
+                      0.8251, 1, -0.7143, 0.3652, 0.9576, 
+                      0, -0.7143, 1, -0.4, 0.3333,
+                      0, 0.3652, -0.4, 1, 0,
+                      -0.5443, 0.9576, 0.3333, 0, 1), nrow = 5)
+
+colnames(my_matrix) <- c("asrt", "mic", "hr", "cat_learn", "cr")
+rownames(my_matrix) <- c("asrt", "mic", "hr", "cat_learn", "cr")
+
+# Perform factor analyzes for all possible combinations
+for (i in 1:length(asrtHR_values)) {
+  for (j in 1:length(asrtCatL_values)) {
+    for (k in 1:length(catlCr_values)) {
+      
+      # Mátrix létrehozása a módosított értékekkel
+      my_matrix_new <- my_matrix
+      my_matrix_new[3, 1] <- asrtHR_values[i]
+      my_matrix_new[4, 1] <- asrtCatL_values[j] 
+      my_matrix_new[5, 4] <- catlCr_values[k]
+      
+      # Create a matrix with the modified values
+      cfa <- fa(r = my_matrix_new, nfactors = 1) #, scores = "regression")
+      
+      #print(cfa)
+      
+      # Write factor charges
+      cat(paste0("asrtHR = ", asrtHR_values[i], ", asrtCatL = ", asrtCatL_values[j], ", catlCr = ", catlCr_values[k], "\n"))
+      print(cfa$loadings)
+      cat("\n")
+    }
+  }
+}
+
+sink()
+
+##### R program code for sample number determination with Monte-Carlo simulation for SEM measurement of pattern completion ability
+
+### Helper functions
+
+## Sample size estimation based on
+## Estimating Statistical Power for Structural Equation Models in
+## Developmental Science: A Tutorial in R, Buchberger et al.
+
+# Set-up
+library(SimDesign)
+library(lavaan)
+library(tidyverse)
+library(here)
+
+# helper function
+is_converged <- function(x) {
+  isTRUE(lavInspect(x, 'converged'))
+}
+
+lavaan2numeric <- function(x) {
+  out <- as.numeric(x)
+  names(out) <- names(x)
+  out
+}
+
+get_fitmeasures <-
+  function(x, which = c("cfi", "rmsea", "bic", "aic")) {
+    if (is_converged(x)) {
+      lavaan2numeric(lavaan::fitmeasures(x, which))
+    } else {
+      setNames(rep(NA_real_, length(which)), which)
+    }
+  }
+
+# Model contains Pattern Competition tasks
+model1 <- 'PC =~ T1asrt + T2mic + T3hr + T4cat_learn + T5cr'
+
+model2 <- 
+  'PC =~ T2mic + T3hr + T5cr
+   Gen =~ T1asrt + T4cat_learn'
+
+# Fixed objects
+fixed_objects <-
+  list(model1 = model1,
+       model2 = model2)
+
+# Generate 
+generate_data <- function(condition, fixed_objects = NULL) {
+  #The factor loadings were determined based on the pilot data.
+  pop_model <- paste0("PC=~", 0.078, "*T1asrt +", 0.715, "*T2mic +", 
+                      -0.968, "*T3hr +", 0.705, "*T4cat_learn +", 0.088, "*T5cr;")
+  
+  dat <- data.frame(simulateData(pop_model, sample.nobs = condition$sample_size))
+  return(dat)
+}
+
+# Analyze
+analyze_results <-
+  function(condition, dat, fixed_objects = fixed_objects) {
+    # The object returned by the null function, containing estimates for the fitted model.
+    fits <- map(fixed_objects, ~ sem(., dat, std.lv = TRUE))
+    
+    # The list of fit indices that assess the adequacy of the fitted model.
+    ms <- map(fits, get_fitmeasures)
+    
+    # A list containing the information of the fitted model and goodness-of-fit measures.
+    ret <- list(
+      fitmeasures = ms,
+      sim_model = condition$sim_model,
+      sample_size = condition$sample_size,
+      converged = map_lgl(fits, is_converged)
+    )
+  }
+
+# Summarize the result
+summarize_results <- function(condition, results, fixed_objects = NULL) {
+  rmsea_cut <- 0.06
+  cfi_cut <- 0.95
+  
+  # extract fit measures and add admissible column
+  tidied <- results %>%
+    bind_rows(.id = "rep") %>%
+    mutate(model = names(fitmeasures)) %>%
+    unnest_wider(fitmeasures) %>%
+    mutate(admissible = (rmsea < rmsea_cut) & (cfi > cfi_cut))
+  
+  # combine tidied and results data
+  ret <-
+    tidied %>%
+    group_by(rep) %>%
+    summarise(
+      sim_model = unique(sim_model),
+      best = if (any(converged == FALSE)) {
+        0
+      } else if (is_empty(bic[admissible])) {
+        0
+      } else {
+        parse_number(model[bic == min(bic[admissible])])
+      }
+    ) %>%
+    mutate(
+      model1_chosen = best == 1,
+      sim_model_chosen = best == sim_model
+    ) %>%
+    with(c(
+      best_1 = mean(model1_chosen),
+      best_sim = mean(sim_model_chosen)
+    ))
+  return(ret)
+}
+
+# Run simultation
+res <-
+  runSimulation(
+    design = design,
+    replications = 1000,
+    generate = generate_data,
+    analyse = analyze_results,
+    summarise = summarize_results,
+    store_results = TRUE,
+    parallel = TRUE,
+    #    ncores = ncores,
+    packages = c('SimDesign', 'lavaan', 'tidyverse'),
+    fixed_objects = fixed_objects
+  )
+
+results_df_load_model <-
+  SimExtract(res, what = 'results') %>%
+  bind_rows(.id = "rep") %>%
+  mutate(model = names(fitmeasures)) %>%
+  unnest_wider(fitmeasures) %>%
+  mutate(admissable = (rmsea < 0.06) & (cfi > 0.95))
+
+fs::dir_create(here("intermediate_results"))
+write.csv(res, here("intermediate_results", "res1000new.csv"))
+write.csv(results_df_load_model,here("intermediate_results", "results_df_load_model1000new.csv"))
+
